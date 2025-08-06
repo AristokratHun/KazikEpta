@@ -1,0 +1,593 @@
+import random
+import json
+import os
+import asyncio
+from datetime import datetime, timedelta
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+
+# === НАСТРОЙКИ ===
+TOKEN = ''
+SPAM_COOLDOWN = 5  # секунд между выстрелами
+TOP_COUNT = 10
+
+# === АДМИНИСТРАТОРЫ ===
+ADMINS = ['']  # Твой ID админа
+
+# 📁 Файл для сохранения статистики
+STATS_FILE = 'roulette_stats.json'
+
+# 🎮 Эмодзи
+BULLET = "💥"
+EMPTY = "🔫"
+REVOLVER = "🪃"
+CROWN = "👑"
+# 🎰 Эмодзи для слотов (увеличена частота 7️⃣)
+SLOT_ITEMS = ["🍒", "🍋", "🍉", "🍊", "🔔", "💎", "7️⃣", "7️⃣", "7️⃣"]
+
+# === СМЫСЛОВЫЕ ГРУППЫ ФРАЗ (БЕЗ МЕМОВ) ===
+
+# ✅ ВЫЖИВАНИЕ
+SURVIVAL_PHRASES = [
+    "Повезло, как в лотерее! Сегодня твой день! 🍀",
+    "Фортуна улыбнулась тебе. Продолжай в том же духе!",
+    "Ты на волне удачи — держись крепче!",
+    "Сегодня звёзды сошлись в твою пользу! ✨",
+    "Ты как главный герой — смерть обходит тебя стороной.",
+]
+
+# 💀 "СМЕРТЬ"
+DEATH_PHRASES = [
+    "БАХ! Судьба решена. Ты проиграл.",
+    "Ты услышал последний звук в своей жизни...",
+    "Один выстрел. Одно мгновение. Конец.",
+    "Ты умер. Мир продолжается без тебя.",
+    "Смерть пришла тихо. Но навсегда.",
+]
+
+# === Утилиты для работы с файлом ===
+def load_stats():
+    if os.path.exists(STATS_FILE):
+        try:
+            with open(STATS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, PermissionError):
+            print("⚠️ Ошибка чтения stats.json. Создаём пустую статистику.")
+            return {}
+    return {}
+
+def save_stats(data):
+    try:
+        with open(STATS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        print(f"❌ Не удалось сохранить статистику: {e}")
+
+# Загружаем статистику
+STATS = load_stats()
+
+# === Работа с пользователем ===
+def get_user_stats(user_id):
+    user_id = str(user_id)
+    if user_id not in STATS:
+        STATS[user_id] = {
+            'shots': 0,
+            'deaths': 0,
+            'survivals': 0,
+            'slots_plays': 0,
+            'slots_wins': 0,
+            'slots_losses': 0,
+            'coins': 50000,  # Новый игрок получает 50,000 монет
+            'inventory': {},  # Инвентарь: {item_id: количество}
+            'username': None,
+            'first_play': datetime.now().isoformat(),
+            'last_shot': None
+        }
+    return STATS[user_id]
+
+def update_username(user_id, username):
+    user_id = str(user_id)
+    if username and user_id in STATS:
+        STATS[user_id]['username'] = username
+
+def get_display_name(user):
+    return user.username or user.first_name or f"Игрок {user.id}"
+
+def is_on_cooldown(user_id):
+    user_data = get_user_stats(user_id)
+    last = user_data.get('last_shot')
+    if last:
+        last_time = datetime.fromisoformat(last)
+        now = datetime.now()
+        if now - last_time < timedelta(seconds=SPAM_COOLDOWN):
+            return True
+    return False
+
+def update_last_shot(user_id):
+    STATS[str(user_id)]['last_shot'] = datetime.now().isoformat()
+
+# === Команды бота ===
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = str(user.id)
+    get_user_stats(user_id)
+    update_username(user_id, user.username)
+
+    await update.message.reply_text(
+        f"🔫 Привет, {get_display_name(user)}!\n\n"
+        "Добро пожаловать в *Русскую рулетку*.\n\n"
+        f"• /shoot — проверить удачу (раз в {SPAM_COOLDOWN} сек)\n"
+        "• /slots — сыграть в слоты 🎰\n"
+        "• /stats — твоя статистика\n"
+        "• /top — лучшие выживальщики и богачи\n"
+        "• /rules — правила игр\n"
+        "• /menu — главное меню с кнопками\n\n"
+        "⚠️ Это игра. Никто не пострадает — только эмоции.",
+        parse_mode='Markdown'
+    )
+
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        ["/shoot", "/slots"],
+        ["/stats", "/top"],
+        ["/balance", "/shop"],
+        ["/inv", "/rules"],
+        ["/menu"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text(
+        "🎮 *Главное меню* бота:\n\n"
+        "🔫 /shoot — Русская рулетка\n"
+        "🎰 /slots — Игра в слоты\n"
+        "📊 /stats — Твоя статистика\n"
+        "💰 /balance — Твой баланс\n"
+        "🏪 /shop — Магазин\n"
+        "🎒 /inv — Твой инвентарь\n"
+        "🏆 /top — Лучшие игроки\n"
+        "📜 /rules — Правила игр\n"
+        "🔄 /menu — Вернуться сюда\n\n"
+        "_Выбери команду или нажми на кнопку ниже_",
+        parse_mode='Markdown',
+        reply_markup=reply_markup
+    )
+
+async def shoot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = str(user.id)
+    get_user_stats(user_id)
+    update_username(user_id, user.username)
+
+    if is_on_cooldown(user_id):
+        await update.message.reply_text(
+            f"⏳ Подожди немного! Можно стрелять раз в {SPAM_COOLDOWN} секунд."
+        )
+        return
+
+    # Награда за выживание
+    reward = 250
+
+    # Увеличенный шанс выжить: 2 из 3 (66%)
+    chamber = random.randint(1, 3)
+    stats = get_user_stats(user_id)
+    stats['shots'] += 1
+    update_last_shot(user_id)
+    save_stats(STATS)
+
+    # ✅ ИСПРАВЛЕННАЯ ЛОГИКА:
+    # chamber = 1 → СМЕРТЬ (33%)
+    # chamber = 2, 3 → ВЫЖИЛ (66%)
+    if chamber == 1:
+        stats['deaths'] += 1
+        phrase = random.choice(DEATH_PHRASES)
+        result = f"{BULLET} *{phrase}* 💀"
+        image = "https://c.tenor.com/I6kN-6X7nhAAAAAd/rickroll-roll.gif"
+        
+        await update.message.reply_text(result, parse_mode='Markdown')
+        try:
+            await update.message.reply_animation(image)
+        except:
+            pass
+    else:
+        stats['survivals'] += 1
+        # Награда за выживание
+        stats['coins'] = stats.get('coins', 50000) + reward
+        
+        phrase = random.choice(SURVIVAL_PHRASES)
+        result = f"{EMPTY} *{phrase}* 😅\n\n💰 Ты выжил и получил {reward} монет!\n💳 Баланс: {stats['coins']} монет"
+        image = "https://c.tenor.com/gYrHV0OAmHIAAAAC/survivor-survived.gif"
+
+        await update.message.reply_text(result, parse_mode='Markdown')
+        try:
+            await update.message.reply_animation(image)
+        except:
+            pass
+
+    save_stats(STATS)
+
+async def slots(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    stats = get_user_stats(user_id)
+
+    # Проверка на автоматический режим
+    auto_mode = False
+    auto_count = 1
+    bet = 1
+
+    if context.args:
+        # Проверяем, есть ли "auto" в аргументах
+        if "auto" in context.args:
+            try:
+                auto_index = context.args.index("auto")
+                auto_count = int(context.args[auto_index - 1]) if auto_index > 0 else 1
+                bet = int(context.args[0]) if auto_index > 0 else 1
+                auto_mode = True
+                if auto_count < 1 or auto_count > 100:
+                    await update.message.reply_text("Авто-режим: от 1 до 100 игр.")
+                    return
+            except (ValueError, IndexError):
+                await update.message.reply_text("Используй: `/slots <ставка> auto` или `/slots <ставка> <количество> auto`", parse_mode='Markdown')
+                return
+        else:
+            # Обычный режим
+            try:
+                bet = int(context.args[0])
+            except ValueError:
+                await update.message.reply_text("Используй: `/slots <ставка>`", parse_mode='Markdown')
+                return
+
+    if bet < 1:
+        await update.message.reply_text("Минимальная ставка — 1 монета.")
+        return
+
+    # Проверка баланса для авто-режима
+    total_cost = bet * (auto_count if auto_mode else 1)
+    coins = stats.get('coins', 50000)
+    if coins < total_cost:
+        await update.message.reply_text(f"Недостаточно монет! Нужно {total_cost}, у тебя {coins}.")
+        return
+
+    # Снимаем все монеты сразу
+    stats['coins'] = coins - total_cost
+
+    if auto_mode:
+        # Автоматический режим
+        results = []
+        wins = 0
+        total_won = 0
+
+        msg = await update.message.reply_text(f"🎰 Авто-слоты: {auto_count} игр...")
+
+        for i in range(auto_count):
+            # Генерация результата
+            result = [random.choice(SLOT_ITEMS) for _ in range(3)]
+            
+            # Проверка выигрыша
+            win_amount = 0
+            if len(set(result)) == 1:  # Все 3 символа одинаковые
+                symbol = result[0]
+                if symbol == "💎":
+                    win_amount = bet * 5
+                elif symbol == "7️⃣":
+                    win_amount = bet * 20
+                else:
+                    win_amount = bet * 3
+                
+                wins += 1
+                total_won += win_amount
+            
+            results.append((result, win_amount))
+            stats['slots_plays'] = stats.get('slots_plays', 0) + 1
+            
+            # Обновляем сообщение каждые 10 игр или в конце
+            if (i + 1) % 10 == 0 or (i + 1) == auto_count:
+                await msg.edit_text(f"🎰 Авто-слоты: {i + 1}/{auto_count}...")
+
+        # Подсчет итогов
+        stats['coins'] += total_won
+        stats['slots_wins'] = stats.get('slots_wins', 0) + wins
+        stats['slots_losses'] = stats.get('slots_losses', 0) + (auto_count - wins)
+
+        # Формируем отчет
+        win_rate = (wins / auto_count * 100) if auto_count > 0 else 0
+        report = f"🎰 *Авто-слоты завершены!*\n\n"
+        report += f"🎮 Игр сыграно: {auto_count}\n"
+        report += f"✅ Выигрышей: {wins}\n"
+        report += f"🟥 Проигрышей: {auto_count - wins}\n"
+        report += f"📊 Процент побед: {win_rate:.1f}%\n"
+        report += f"💰 Потрачено: {total_cost} монет\n"
+        report += f"💵 Выиграно: {total_won} монет\n"
+        report += f"💳 Итог: {'+' if total_won - total_cost >= 0 else ''}{total_won - total_cost} монет\n"
+        report += f"🏦 Твой баланс: {stats['coins']} монет"
+
+        await msg.edit_text(report, parse_mode='Markdown')
+
+    else:
+        # Обычный режим
+        # Анимация вращения
+        msg = await update.message.reply_text("🎰 Кручу слоты...")
+
+        # Асинхронная анимация
+        for i in range(3):
+            await asyncio.sleep(0.5)
+            await msg.edit_text(f"🎰 Кручу слоты{'.' * (i+1)}")
+
+        # Генерация результата
+        result = [random.choice(SLOT_ITEMS) for _ in range(3)]
+        display = " ".join(result)
+
+        # Обновляем статистику
+        stats['slots_plays'] = stats.get('slots_plays', 0) + 1
+
+        win_multiplier = 0
+        win_reason = ""
+
+        if len(set(result)) == 1:  # Все 3 символа одинаковые
+            symbol = result[0]
+            if symbol == "💎":
+                win_multiplier = 5
+                win_reason = "Три алмаза! 💎💎💎"
+            elif symbol == "7️⃣":
+                win_multiplier = 20
+                win_reason = "ДЖЕКПОТ! 7️⃣7️⃣7️⃣"
+            else:
+                win_multiplier = 3
+                win_reason = f"Три {symbol}!"
+
+            win_amount = bet * win_multiplier
+            stats['coins'] += win_amount
+            stats['slots_wins'] = stats.get('slots_wins', 0) + 1
+
+            await msg.edit_text(
+                f"🎉 *ПОБЕДА!* 🎉\n\n"
+                f"{display}\n\n"
+                f"💥 {win_reason}\n"
+                f"💰 Ты выиграл: {win_amount} монет!\n"
+                f"💳 Твой баланс: {stats['coins']} монет\n"
+                f"📌 Это твой {stats['slots_wins']}-й выигрыш!",
+                parse_mode='Markdown'
+            )
+        else:
+            stats['slots_losses'] = stats.get('slots_losses', 0) + 1
+            await msg.edit_text(
+                f"🟥 *Проигрыш*\n\n"
+                f"{display}\n\n"
+                f"📉 Ты проиграл {bet} монет.\n"
+                f"💳 Твой баланс: {stats['coins']} монет\n"
+                f"Повезёт в следующий раз! 😉",
+                parse_mode='Markdown'
+            )
+
+    save_stats(STATS)
+
+async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    stats = get_user_stats(user_id)
+    coins = stats.get('coins', 50000)
+    await update.message.reply_text(
+        f"💰 *Твой баланс*: {coins} монет",
+        parse_mode='Markdown'
+    )
+
+async def givecoins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    admin_id = str(update.effective_user.id)
+    
+    # Проверка на админа
+    if admin_id not in ADMINS:
+        await update.message.reply_text("❌ У тебя нет прав для этой команды.")
+        return
+
+    # Проверка аргументов
+    if len(context.args) < 2:
+        await update.message.reply_text("Используй: `/givecoins <user_id> <amount>`", parse_mode='Markdown')
+        return
+
+    try:
+        target_user_id = context.args[0]
+        amount = int(context.args[1])
+        
+        if amount <= 0:
+            await update.message.reply_text("Количество должно быть больше 0.")
+            return
+            
+        # Проверяем существование пользователя
+        if target_user_id not in STATS:
+            await update.message.reply_text("Пользователь не найден.")
+            return
+
+        # Начисляем монеты
+        STATS[target_user_id]['coins'] = STATS[target_user_id].get('coins', 50000) + amount
+        save_stats(STATS)
+        
+        username = STATS[target_user_id].get('username', f"Игрок {target_user_id}")
+        await update.message.reply_text(
+            f"✅ Успешно!\n"
+            f"💰 Игроку {username} начислено {amount} монет.\n"
+            f"💳 Новый баланс: {STATS[target_user_id]['coins']} монет"
+        )
+        
+    except ValueError:
+        await update.message.reply_text("Ошибка: неправильный формат. Используй числа.")
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка: {str(e)}")
+
+async def shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    stats = get_user_stats(user_id)
+    coins = stats.get('coins', 50000)
+
+    message = f"🏪 *Магазин*\n"
+    message += f"💰 У тебя: {coins} монет\n\n"
+    message += "🛍️ *Доступные товары:*\n\n"
+
+    keyboard = [
+        [InlineKeyboardButton("🔫 Золотой револьвер (временно недоступно)", callback_data="gun")],
+        [InlineKeyboardButton("💎 Кристалл удачи (временно недоступно)", callback_data="crystal")],
+        [InlineKeyboardButton("🛡️ Амулет защиты (временно недоступно)", callback_data="amulet")],
+        [InlineKeyboardButton("🎁 Мешок с монетами (временно недоступно)", callback_data="bag")],
+        [InlineKeyboardButton("🔄 Обновить", callback_data="refresh_shop")]
+    ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        message,
+        parse_mode='Markdown',
+        reply_markup=reply_markup
+    )
+
+async def inv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    stats = get_user_stats(user_id)
+    inventory = stats.get('inventory', {})
+    
+    if not inventory:
+        await update.message.reply_text(
+            "🎒 *Твой инвентарь пуст* 🎒\n\n"
+            "Посети /shop, чтобы купить полезные предметы (временно недоступно)!",
+            parse_mode='Markdown'
+        )
+        return
+    
+    message = "🎒 *Твой инвентарь* 🎒\n\n"
+    
+    # Описание предметов (временно)
+    item_descriptions = {
+        "gun": "🔫 Золотой револьвер",
+        "crystal": "💎 Кристалл удачи",
+        "amulet": "🛡️ Амулет защиты",
+        "bag": "🎁 Мешок с монетами"
+    }
+    
+    for item_id, quantity in inventory.items():
+        if quantity > 0:
+            item_name = item_descriptions.get(item_id, f"❓ Неизвестный предмет ({item_id})")
+            message += f"• {item_name} — {quantity} шт.\n"
+    
+    if not any(quantity > 0 for quantity in inventory.values()):
+        message = "🎒 *Твой инвентарь пуст* 🎒\n\nПосети /shop, чтобы купить полезные предметы (временно недоступно)!"
+    
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📜 *Правила игры в боте*\n\n"
+        "🔫 *Русская рулетка*\n"
+        "• Используй /shoot — 2 из 3 шансов на выживание (66%)\n"
+        "• Раз в 5 секунд можно стрелять\n"
+        "• За каждый выстрел, где ты выжил — получаешь 250 монет\n"
+        "• Выживай и поднимай статистику!\n\n"
+        "🎰 *Слот-машина*\n"
+        "• Используй `/slots <ставка>` — чтобы играть\n"
+        "• Используй `/slots <ставка> auto` — авто-режим (1 игра)\n"
+        "• Используй `/slots <ставка> <кол-во> auto` — авто-режим (до 100 игр)\n"
+        "• Минимальная ставка: 1 монета\n"
+        "• Выигрыши:\n"
+        "  • 3 одинаковых символа → ×3 ставки\n"
+        "  • 3 💎 → ×5 ставки\n"
+        "  • 3 7️⃣ → ×20 ставки\n"
+        "• Все остальные комбинации — *проигрыш*\n\n"
+        "💰 *Виртуальная валюта*\n"
+        "• Новым игрокам выдаётся 50,000 монет\n"
+        "• Используй /balance — проверить баланс\n\n"
+        "🏪 *Магазин и инвентарь*\n"
+        "• Используй /shop — купить полезные предметы (временно недоступно)\n"
+        "• Используй /inv — посмотреть инвентарь\n\n"
+        "📊 Статистика сохраняется. Попробуй стать лучшим!",
+        parse_mode='Markdown'
+    )
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    get_user_stats(user_id)
+    stats = get_user_stats(user_id)
+
+    name = get_display_name(update.effective_user)
+    coins = stats.get('coins', 50000)
+    total_shots = stats.get('shots', 0)
+    total_slots = stats.get('slots_plays', 0)
+    survival_rate = (stats.get('survivals', 0) / total_shots * 100) if total_shots > 0 else 0
+    slots_win_rate = (stats.get('slots_wins', 0) / total_slots * 100) if total_slots > 0 else 0
+
+    message = f"👤 *Статистика игрока:* {name}\n"
+    message += f"💰 *Баланс*: {coins} монет\n\n"
+
+    if total_shots > 0:
+        message += (
+            f"🔫 *Русская рулетка*\n"
+            f"• Всего выстрелов: {total_shots}\n"
+            f"• Выживаний: {stats.get('survivals', 0)}\n"
+            f"• Поражений: {stats.get('deaths', 0)}\n"
+            f"• Процент выживания: {survival_rate:.1f}%\n\n"
+        )
+    else:
+        message += "🔫 Ты не играл в русскую рулетку\n\n"
+
+    if total_slots > 0:
+        message += (
+            f"🎰 *Слоты*\n"
+            f"• Сыграно: {total_slots}\n"
+            f"• Побед: {stats.get('slots_wins', 0)}\n"
+            f"• Поражений: {stats.get('slots_losses', 0)}\n"
+            f"• Процент побед: {slots_win_rate:.1f}%\n\n"
+        )
+    else:
+        message += "🎰 Ты не играл в слоты\n\n"
+
+    message += "⏱ Последний выстрел: недавно"
+
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not STATS:
+        await update.message.reply_text("Пока никто не играл. Начни первым — /shoot!")
+        return
+
+    # Топ по выживаниям
+    active_roulette = {uid: d for uid, d in STATS.items() if d.get('shots', 0) > 0}
+    if active_roulette:
+        sorted_roulette = sorted(active_roulette.items(), key=lambda x: x[1].get('survivals', 0), reverse=True)
+        roulette_text = f"{CROWN} *Топ-{TOP_COUNT} выживальщиков* {CROWN}\n\n"
+        for i, (uid, data) in enumerate(sorted_roulette[:TOP_COUNT], 1):
+            rate = (data.get('survivals', 0) / data.get('shots', 1) * 100)
+            name = data.get('username') or f"Игрок {uid}"
+            roulette_text += f"{i}. `{name}` — ✅ {data.get('survivals', 0)} выживаний ({rate:.0f}%)\n"
+    else:
+        roulette_text = f"{CROWN} *Топ выживальщиков* {CROWN}\n\nПока никто не играл.\n\n"
+
+    # Топ богачей
+    sorted_rich = sorted(STATS.items(), key=lambda x: x[1].get('coins', 0), reverse=True)
+    rich_text = f"💰 *Топ-{TOP_COUNT} богачей* 💰\n\n"
+    for i, (uid, data) in enumerate(sorted_rich[:TOP_COUNT], 1):
+        coins = data.get('coins', 0)
+        name = data.get('username') or f"Игрок {uid}"
+        rich_text += f"{i}. `{name}` — {coins} монет\n"
+
+    message = roulette_text + "\n" + rich_text
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+# === Запуск ===
+if __name__ == '__main__':
+    print("🎲 Русская рулетка запущена...")
+    
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    # Все команды
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("menu", menu))
+    app.add_handler(CommandHandler("shoot", shoot))
+    app.add_handler(CommandHandler("slots", slots))
+    app.add_handler(CommandHandler("balance", balance))
+    app.add_handler(CommandHandler("givecoins", givecoins))
+    app.add_handler(CommandHandler("shop", shop))
+    app.add_handler(CommandHandler("inv", inv))
+    app.add_handler(CommandHandler("rules", rules))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("top", top))
+
+    try:
+        app.run_polling()
+    except KeyboardInterrupt:
+        print("\n🛑 Бот остановлен. Сохраняем статистику...")
+        save_stats(STATS)
+        print("✅ Готово.")
